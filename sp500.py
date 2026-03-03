@@ -1,9 +1,13 @@
 """S&P 500 universe helpers - fetch constituents and top earners."""
 import datetime as dt
+import io
 import time
+import requests
 import pandas as pd
 import yfinance as yf
 from cachetools import TTLCache
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 _constituents_cache = TTLCache(maxsize=1, ttl=86400)
 _earners_cache = TTLCache(maxsize=64, ttl=3600)
@@ -15,7 +19,9 @@ def get_sp500_tickers() -> pd.DataFrame:
     if "tickers" in _constituents_cache:
         return _constituents_cache["tickers"]
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    resp.raise_for_status()
+    tables = pd.read_html(io.StringIO(resp.text))
     df = tables[0][["Symbol", "Security", "GICS Sector"]].copy()
     df.columns = ["ticker", "name", "sector"]
     df["ticker"] = df["ticker"].str.replace(".", "-", regex=False)
@@ -43,26 +49,36 @@ def get_default_date() -> dt.date:
 def _download_in_batches(tickers: list[str], start, end,
                          batch_size: int = 50, max_retries: int = 3) -> dict:
     """Download price data in small batches to avoid rate limiting."""
+    # Set a custom user-agent for yfinance requests
+    yf_session = requests.Session()
+    yf_session.headers["User-Agent"] = USER_AGENT
+
     all_data = {}
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
-        tickers_str = " ".join(batch)
 
         for attempt in range(max_retries):
             try:
-                raw = yf.download(tickers_str, start=start, end=end,
-                                  group_by="ticker", threads=True,
-                                  progress=False)
+                raw = yf.download(
+                    batch,          # pass list directly
+                    start=start,
+                    end=end,
+                    group_by="ticker",
+                    threads=True,
+                    progress=False,
+                    session=yf_session,
+                )
                 if raw is not None and not raw.empty:
-                    # For single ticker, yf.download doesn't nest by ticker
                     if len(batch) == 1:
                         all_data[batch[0]] = raw
                     else:
+                        # yfinance returns MultiIndex columns (ticker, field)
                         for tk in batch:
                             try:
-                                tk_data = raw[tk]
-                                if tk_data is not None and not tk_data.empty:
-                                    all_data[tk] = tk_data
+                                if tk in raw.columns.get_level_values(0):
+                                    tk_data = raw[tk]
+                                    if tk_data is not None and not tk_data.empty:
+                                        all_data[tk] = tk_data
                             except (KeyError, TypeError):
                                 pass
                 break  # success

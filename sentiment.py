@@ -7,6 +7,8 @@ from urllib.parse import quote
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from cachetools import TTLCache
 
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
 _analyzer = SentimentIntensityAnalyzer()
 _headline_cache = TTLCache(maxsize=256, ttl=1800)  # 30 min
 
@@ -24,7 +26,8 @@ def fetch_headlines(ticker: str, company_name: str, max_results: int = 30) -> li
     url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
     try:
-        feed = feedparser.parse(url)
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
+        feed = feedparser.parse(resp.content)
     except Exception:
         return []
 
