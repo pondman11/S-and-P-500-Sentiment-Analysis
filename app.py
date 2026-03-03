@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
-from sp500 import get_top_earners
+from sp500 import get_top_earners, get_default_date, preload_prices
 from sentiment import get_batch_sentiment
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ controls = dbc.Card([
         html.Label("Reference Date", className="fw-bold mb-1"),
         dcc.DatePickerSingle(
             id="date-picker",
-            date=dt.date.today(),
+            date=get_default_date(),
             max_date_allowed=dt.date.today(),
             display_format="YYYY-MM-DD",
             className="mb-3",
@@ -314,6 +314,13 @@ def handle_bar_click(click_data, close_clicks, data, is_open):
 
     return True, title, html.Div(body_items)
 
+
+# ---------------------------------------------------------------------------
+# Preload price cache on startup
+# ---------------------------------------------------------------------------
+print("Preloading S&P 500 price data...")
+preload_prices()
+print("Price data cached.")
 
 # ---------------------------------------------------------------------------
 # Run
