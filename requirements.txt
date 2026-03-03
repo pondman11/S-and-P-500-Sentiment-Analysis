@@ -1,0 +1,11 @@
+dash==2.18.2
+dash-bootstrap-components==1.6.0
+plotly==5.24.1
+pandas==2.2.3
+yfinance==0.2.48
+vaderSentiment==3.3.2
+feedparser==6.0.11
+requests==2.32.3
+beautifulsoup4==4.12.3
+gunicorn==23.0.0
+cachetools==5.5.0
