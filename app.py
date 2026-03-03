@@ -6,238 +6,317 @@ import dash
 from dash import dcc, html, Input, Output, State, callback, no_update
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
+import plotly.express as px
 import pandas as pd
 
 from sp500 import get_top_earners
-from sentiment import get_sentiment_for_company
+from sentiment import get_batch_sentiment
 
+# ---------------------------------------------------------------------------
+# App init
+# ---------------------------------------------------------------------------
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.DARKLY],
     title="S&P 500 Sentiment Analysis",
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
 )
-server = app.server  # For gunicorn
+server = app.server  # for gunicorn
 
-# ── Layout ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
+controls = dbc.Card([
+    dbc.CardHeader("Controls"),
+    dbc.CardBody([
+        html.Label("Reference Date", className="fw-bold mb-1"),
+        dcc.DatePickerSingle(
+            id="date-picker",
+            date=dt.date.today(),
+            max_date_allowed=dt.date.today(),
+            display_format="YYYY-MM-DD",
+            className="mb-3",
+            style={"width": "100%"},
+        ),
+        html.Label("Number of Companies", className="fw-bold mb-1"),
+        dcc.Slider(
+            id="n-companies",
+            min=10, max=50, step=5, value=10,
+            marks={i: str(i) for i in range(10, 55, 5)},
+            className="mb-3",
+        ),
+        dbc.Button("Analyze", id="btn-analyze", color="primary",
+                    className="w-100 mt-2", n_clicks=0),
+    ]),
+])
 
 app.layout = dbc.Container([
-    dbc.Row(dbc.Col(html.H1("S&P 500 Sentiment Analysis ⚡",
-                             className="text-center my-4"))),
+    # Header
+    dbc.Row(dbc.Col(html.Div([
+        html.H1("S&P 500 Sentiment Analysis", className="mb-0"),
+        html.P("Top earners sentiment from news headlines (VADER)",
+               className="text-muted"),
+    ]), width=12), className="my-3"),
 
-    # Controls
+    # Controls + main chart
     dbc.Row([
+        dbc.Col(controls, md=3),
         dbc.Col([
-            dbc.Label("Reference Date"),
-            dcc.DatePickerSingle(
-                id="date-picker",
-                date=dt.date.today(),
-                max_date_allowed=dt.date.today(),
-                display_format="YYYY-MM-DD",
-                className="mb-2",
+            dcc.Loading(
+                id="loading-main",
+                type="circle",
+                children=html.Div(id="main-chart-container"),
             ),
-        ], md=3),
-        dbc.Col([
-            dbc.Label(id="slider-label", children="Top 10 Earners"),
-            dcc.Slider(
-                id="n-slider", min=10, max=50, step=5, value=10,
-                marks={i: str(i) for i in range(10, 55, 10)},
-            ),
-        ], md=5),
-        dbc.Col([
-            dbc.Button("Analyze", id="analyze-btn", color="primary",
-                       size="lg", className="mt-4 w-100"),
-        ], md=2),
-        dbc.Col([
-            dbc.Spinner(html.Div(id="status-text", className="mt-4"),
-                        color="primary", size="sm"),
-        ], md=2),
-    ], className="mb-4 align-items-end"),
+        ], md=9),
+    ]),
 
-    # Main bar chart
-    dbc.Row(dbc.Col(dcc.Graph(id="sentiment-bar", config={"displayModeBar": True}))),
-
-    # Secondary row: pie chart + heatmap
+    # Secondary charts row
     dbc.Row([
-        dbc.Col(dcc.Graph(id="sentiment-pie"), md=4),
-        dbc.Col(dcc.Graph(id="sentiment-heatmap"), md=8),
+        dbc.Col(dcc.Loading(html.Div(id="pie-container")), md=4),
+        dbc.Col(dcc.Loading(html.Div(id="scatter-container")), md=8),
     ], className="mt-3"),
+
+    # Sector heatmap
+    dbc.Row([
+        dbc.Col(dcc.Loading(html.Div(id="heatmap-container")), md=12),
+    ], className="mt-3 mb-5"),
+
+    # Hidden store for full data
+    dcc.Store(id="sentiment-data"),
 
     # Drill-through modal
     dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle(id="modal-title")),
         dbc.ModalBody(id="modal-body"),
-        dbc.ModalFooter(dbc.Button("Close", id="modal-close", className="ms-auto")),
-    ], id="headline-modal", size="lg", scrollable=True),
-
-    # Hidden store for full sentiment data
-    dcc.Store(id="sentiment-store"),
+        dbc.ModalFooter(
+            dbc.Button("Close", id="modal-close", className="ms-auto", n_clicks=0)
+        ),
+    ], id="modal", size="lg", is_open=False, scrollable=True),
 ], fluid=True)
 
-
-# ── Callbacks ───────────────────────────────────────────────────────────────
-
-@callback(Output("slider-label", "children"), Input("n-slider", "value"))
-def update_label(n):
-    return f"Top {n} Earners"
-
+# ---------------------------------------------------------------------------
+# Callbacks
+# ---------------------------------------------------------------------------
 
 @callback(
-    Output("sentiment-store", "data"),
-    Output("status-text", "children"),
-    Input("analyze-btn", "n_clicks"),
+    Output("sentiment-data", "data"),
+    Output("main-chart-container", "children"),
+    Output("pie-container", "children"),
+    Output("scatter-container", "children"),
+    Output("heatmap-container", "children"),
+    Input("btn-analyze", "n_clicks"),
     State("date-picker", "date"),
-    State("n-slider", "value"),
+    State("n-companies", "value"),
     prevent_initial_call=True,
 )
-def run_analysis(n_clicks, date_str, n):
-    ref = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
-    try:
-        earners = get_top_earners(n=n, ref_date=ref)
-    except Exception as e:
-        return no_update, f"❌ Error fetching earners: {e}"
+def run_analysis(n_clicks, date_str, n_companies):
+    ref_date = dt.date.fromisoformat(date_str)
+    earners = get_top_earners(n=n_companies, ref_date=ref_date)
 
-    results = []
-    for _, row in earners.iterrows():
-        data = get_sentiment_for_company(row["ticker"], row["name"])
-        data["sector"] = row["sector"]
-        data["close"] = row["close"]
-        data["change_pct"] = row["change_pct"]
-        results.append(data)
+    if earners.empty:
+        msg = html.Div(
+            dbc.Alert("No data found for that date. Markets may have been closed.",
+                      color="warning"),
+        )
+        return None, msg, "", "", ""
 
-    return json.loads(json.dumps(results, default=str)), f"✅ {len(results)} companies analyzed"
+    companies = earners.to_dict("records")
+    results = get_batch_sentiment(companies)
 
+    # Store serializable data
+    store_data = []
+    for r in results:
+        store_data.append({
+            "ticker": r["ticker"],
+            "name": r["name"],
+            "sector": r["sector"],
+            "close": r["close"],
+            "change_pct": r["change_pct"],
+            "positive_count": r["positive_count"],
+            "negative_count": r["negative_count"],
+            "neutral_count": r["neutral_count"],
+            "avg_compound": r["avg_compound"],
+            "total_headlines": r["total_headlines"],
+            "headlines": r["headlines"],
+        })
 
-@callback(
-    Output("sentiment-bar", "figure"),
-    Output("sentiment-pie", "figure"),
-    Output("sentiment-heatmap", "figure"),
-    Input("sentiment-store", "data"),
-)
-def update_charts(data):
-    if not data:
-        empty = go.Figure()
-        empty.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-                            plot_bgcolor="rgba(0,0,0,0)")
-        return empty, empty, empty
+    df = pd.DataFrame(store_data)
 
-    df = pd.DataFrame(data)
-    tickers = df["ticker"].tolist()
-    names = df["name"].tolist()
-    labels = [f"{t}<br>{n[:20]}" for t, n in zip(tickers, names)]
-
-    # ── Bar chart: positive (green) + negative (red, shown below axis) ──
-    bar_fig = go.Figure()
-    bar_fig.add_trace(go.Bar(
-        x=labels, y=df["positive_count"],
-        name="Positive", marker_color="#00c853",
+    # --- Main bar chart: positive (green) above axis, negative (red) below ---
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        x=df["ticker"],
+        y=df["positive_count"],
+        name="Positive",
+        marker_color="#3fb950",
         customdata=df["ticker"],
-        hovertemplate="%{x}<br>Positive: %{y}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Positive: %{y}<extra></extra>",
     ))
-    bar_fig.add_trace(go.Bar(
-        x=labels, y=-df["negative_count"],
-        name="Negative", marker_color="#ff1744",
+    fig_bar.add_trace(go.Bar(
+        x=df["ticker"],
+        y=[-v for v in df["negative_count"]],
+        name="Negative",
+        marker_color="#f85149",
         customdata=df["ticker"],
-        hovertemplate="%{x}<br>Negative: %{customdata}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Negative: %{customdata}<extra></extra>",
     ))
-    bar_fig.update_layout(
+    fig_bar.update_layout(
         barmode="overlay",
-        title="Sentiment Counts by Company (click bars to drill through)",
-        xaxis_title="Company", yaxis_title="Headline Count",
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.12),
+        title=f"Sentiment: Top {n_companies} S&P 500 Earners ({ref_date})",
+        xaxis_title="Company",
+        yaxis_title="Headline Count",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
         height=500,
     )
+    fig_bar.add_hline(y=0, line_color="#8b949e", line_width=1)
 
-    # ── Pie chart: overall sentiment split ──
+    # --- Pie chart: aggregate sentiment split ---
     total_pos = int(df["positive_count"].sum())
     total_neg = int(df["negative_count"].sum())
     total_neu = int(df["neutral_count"].sum())
-    pie_fig = go.Figure(go.Pie(
+    fig_pie = go.Figure(go.Pie(
         labels=["Positive", "Negative", "Neutral"],
         values=[total_pos, total_neg, total_neu],
-        marker_colors=["#00c853", "#ff1744", "#ffd600"],
+        marker_colors=["#3fb950", "#f85149", "#8b949e"],
         hole=0.4,
     ))
-    pie_fig.update_layout(
+    fig_pie.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
         title="Overall Sentiment Split",
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
         height=400,
     )
 
-    # ── Heatmap: companies × sentiment ──
-    heat_fig = go.Figure(go.Heatmap(
-        z=[df["positive_count"], df["neutral_count"], df["negative_count"]],
-        x=tickers,
-        y=["Positive", "Neutral", "Negative"],
-        colorscale=[[0, "#1a1a2e"], [0.5, "#ffd600"], [1, "#00c853"]],
-        hovertemplate="Company: %{x}<br>%{y}: %{z}<extra></extra>",
+    # --- Scatter: sentiment vs price change ---
+    fig_scatter = go.Figure(go.Scatter(
+        x=df["change_pct"],
+        y=df["avg_compound"],
+        mode="markers+text",
+        text=df["ticker"],
+        textposition="top center",
+        marker=dict(
+            size=df["total_headlines"].clip(lower=5) * 2,
+            color=df["avg_compound"],
+            colorscale=[[0, "#f85149"], [0.5, "#8b949e"], [1, "#3fb950"]],
+            showscale=True,
+            colorbar=dict(title="Sentiment"),
+        ),
+        hovertemplate="<b>%{text}</b><br>Price Δ: %{x:.2f}%<br>Sentiment: %{y:.3f}<extra></extra>",
     ))
-    heat_fig.update_layout(
-        title="Sentiment Heatmap",
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        height=300,
+    fig_scatter.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        title="Price Change vs News Sentiment",
+        xaxis_title="Price Change (%)",
+        yaxis_title="Avg Compound Score",
+        height=400,
     )
 
-    return bar_fig, pie_fig, heat_fig
+    # --- Heatmap: sector aggregation ---
+    sector_df = df.groupby("sector").agg(
+        avg_sentiment=("avg_compound", "mean"),
+        total_positive=("positive_count", "sum"),
+        total_negative=("negative_count", "sum"),
+        companies=("ticker", "count"),
+    ).reset_index()
+
+    fig_heatmap = go.Figure(go.Bar(
+        x=sector_df["sector"],
+        y=sector_df["avg_sentiment"],
+        marker_color=[
+            "#3fb950" if v >= 0 else "#f85149"
+            for v in sector_df["avg_sentiment"]
+        ],
+        hovertemplate="<b>%{x}</b><br>Avg Sentiment: %{y:.3f}<extra></extra>",
+    ))
+    fig_heatmap.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        title="Average Sentiment by Sector",
+        xaxis_title="Sector",
+        yaxis_title="Avg Compound Score",
+        height=350,
+    )
+
+    return (
+        store_data,
+        dcc.Graph(id="main-bar", figure=fig_bar),
+        dcc.Graph(figure=fig_pie),
+        dcc.Graph(figure=fig_scatter),
+        dcc.Graph(figure=fig_heatmap),
+    )
 
 
 @callback(
-    Output("headline-modal", "is_open"),
+    Output("modal", "is_open"),
     Output("modal-title", "children"),
     Output("modal-body", "children"),
-    Input("sentiment-bar", "clickData"),
+    Input("main-bar", "clickData"),
     Input("modal-close", "n_clicks"),
-    State("sentiment-store", "data"),
-    State("headline-modal", "is_open"),
+    State("sentiment-data", "data"),
+    State("modal", "is_open"),
     prevent_initial_call=True,
 )
-def toggle_modal(click_data, close_clicks, data, is_open):
+def handle_bar_click(click_data, close_clicks, data, is_open):
     ctx = dash.callback_context
     if not ctx.triggered:
         return no_update, no_update, no_update
 
     trigger = ctx.triggered[0]["prop_id"]
-    if "modal-close" in trigger:
-        return False, "", ""
 
-    if not click_data or not data:
+    if "modal-close" in trigger:
+        return False, no_update, no_update
+
+    if click_data is None or data is None:
         return no_update, no_update, no_update
 
     point = click_data["points"][0]
-    curve = point.get("curveNumber", 0)
-    idx = point.get("pointIndex", 0)
+    ticker = point["x"]
+    curve = point["curveNumber"]  # 0 = positive, 1 = negative
 
-    if idx >= len(data):
+    # Find company data
+    company = None
+    for d in data:
+        if d["ticker"] == ticker:
+            company = d
+            break
+    if company is None:
         return no_update, no_update, no_update
 
-    company = data[idx]
     sentiment_type = "positive" if curve == 0 else "negative"
-    headlines = company.get(f"{sentiment_type}_headlines", [])
-    color = "#00c853" if sentiment_type == "positive" else "#ff1744"
+    headlines = [
+        h for h in company["headlines"]
+        if h["sentiment"]["label"] == sentiment_type
+    ]
+    headlines.sort(key=lambda h: abs(h["sentiment"]["compound"]), reverse=True)
 
-    title = f"{company['name']} ({company['ticker']}) — {sentiment_type.title()} Headlines"
+    title = f"{company['name']} ({ticker}) — {sentiment_type.title()} Headlines"
 
-    if not headlines:
-        body = html.P("No headlines found.", className="text-muted")
-    else:
-        rows = []
-        for h in headlines[:15]:
-            rows.append(html.Tr([
-                html.Td(html.A(h["title"], href=h["link"], target="_blank",
-                               style={"color": color})),
-                html.Td(h.get("source", ""), style={"whiteSpace": "nowrap"}),
-                html.Td(f"{h['compound']:+.3f}", style={"fontFamily": "monospace"}),
-            ]))
-        body = dbc.Table([
-            html.Thead(html.Tr([html.Th("Headline"), html.Th("Source"), html.Th("Score")])),
-            html.Tbody(rows),
-        ], bordered=True, dark=True, hover=True, size="sm")
+    body_items = []
+    for h in headlines[:20]:
+        score = h["sentiment"]["compound"]
+        css_class = f"headline-{sentiment_type}"
+        body_items.append(html.Div([
+            html.Div([
+                html.A(h["title"], href=h["link"], target="_blank",
+                       className="fw-bold"),
+                html.Span(f"  ({score:+.3f})", className="text-muted ms-2"),
+            ]),
+            html.Small(f"{h['source']} • {h['published']}",
+                       className="text-muted"),
+        ], className=css_class + " mb-2 py-1"))
 
-    return True, title, body
+    if not body_items:
+        body_items = [html.P(f"No {sentiment_type} headlines found.", className="text-muted")]
+
+    return True, title, html.Div(body_items)
 
 
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=8050)
