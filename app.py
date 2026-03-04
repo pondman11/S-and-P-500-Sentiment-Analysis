@@ -5,11 +5,9 @@ import dash
 from dash import dcc, html, Input, Output, State, callback, no_update
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pandas as pd
 
 from sentiment import get_sentiment_over_range
-from prices import get_prices
 
 # ---------------------------------------------------------------------------
 # Config
@@ -340,7 +338,7 @@ app.layout = dbc.Container([
 
     # Footer
     html.Div(
-        html.P("Built with Dash · Data from Google News & Yahoo Finance",
+        html.P("Built with Dash · Data from Google News",
                style={"color": C_MUTED, "fontSize": "0.7rem", "textAlign": "center",
                       "padding": "2rem 0 1rem"}),
     ),
@@ -419,13 +417,7 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
 
     sent = get_sentiment_over_range(ticker, name, start, end)
 
-    # Gracefully handle price fetch failures
-    try:
-        prices = get_prices(ticker, start, end)
-    except Exception:
-        prices = []
-
-    if not sent["headlines"] and not prices:
+    if not sent["headlines"]:
         msg = dbc.Card(
             dbc.CardBody(html.Div([
                 html.Div("🔍", className="icon"),
@@ -436,16 +428,10 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
         return None, "", msg, "", ""
 
     daily_df = pd.DataFrame(sent["daily"])
-    price_df = pd.DataFrame(prices) if prices else pd.DataFrame()
     s = sent["summary"]
 
     # --- Metrics ---
     avg_color = C_GREEN if s["avg_compound"] >= 0.05 else C_RED if s["avg_compound"] <= -0.05 else C_MUTED
-    price_change = ""
-    if not price_df.empty and len(price_df) >= 2:
-        pc = ((price_df.iloc[-1]["close"] - price_df.iloc[0]["close"]) / price_df.iloc[0]["close"]) * 100
-        pc_color = C_GREEN if pc >= 0 else C_RED
-        price_change = _metric_card(f"{pc:+.1f}%", "Price Change", pc_color)
 
     metrics = dbc.Row([
         dbc.Col(_metric_card(f"{s['avg_compound']:+.3f}", "Avg Sentiment", avg_color), width=3),
@@ -455,36 +441,14 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
             "Bullish / Bearish",
             C_GREEN if s["positive"] > s["negative"] else C_RED if s["negative"] > s["positive"] else C_MUTED,
         ), width=3),
-        dbc.Col(price_change if price_change else _metric_card("—", "Price Change"), width=3),
+        dbc.Col(_metric_card(str(s["neutral"]), "Neutral"), width=3),
     ], className="mb-3 g-3")
 
-    # --- Main chart ---
-    has_prices = not price_df.empty
+    # --- Main chart (sentiment only) ---
     daily_with_data = daily_df[daily_df["avg_compound"].notna()]
-    has_sentiment = not daily_with_data.empty
+    fig = go.Figure()
 
-    if has_prices and has_sentiment:
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.6, 0.4], vertical_spacing=0.06,
-        )
-    else:
-        fig = make_subplots(rows=1, cols=1)
-
-    # Price trace
-    if has_prices:
-        fig.add_trace(go.Scatter(
-            x=price_df["date"], y=price_df["close"],
-            mode="lines", name="Close",
-            line=dict(color=C_ACCENT, width=2.5, shape="spline"),
-            fill="tozeroy",
-            fillcolor="rgba(88,166,255,0.05)",
-            hovertemplate="<b>%{x}</b><br>$%{y:.2f}<extra></extra>",
-        ), row=1, col=1)
-
-    # Sentiment bars
-    if has_sentiment:
-        row = 2 if has_prices else 1
+    if not daily_with_data.empty:
         colors = [
             "rgba(63,185,80,0.85)" if v >= 0 else "rgba(248,81,73,0.85)"
             for v in daily_with_data["avg_compound"]
@@ -494,26 +458,20 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
             name="Sentiment", marker_color=colors,
             marker_line_width=0,
             hovertemplate="<b>%{x}</b><br>Sentiment: %{y:+.3f}<extra></extra>",
-        ), row=row, col=1)
-        fig.add_hline(y=0, line_color=C_BORDER, line_width=1, row=row, col=1)
+        ))
+        fig.add_hline(y=0, line_color=C_BORDER, line_width=1)
 
     fig.update_layout(
         **CHART_LAYOUT,
-        height=480,
+        height=420,
         showlegend=False,
-        yaxis=dict(title="Price ($)", gridcolor="rgba(30,42,58,0.4)", zeroline=False,
+        yaxis=dict(title="Sentiment Score", gridcolor="rgba(30,42,58,0.4)", zeroline=False,
                    title_font=dict(size=11, color=C_MUTED)),
         hoverlabel=dict(
             bgcolor=C_CARD, bordercolor=C_BORDER,
             font=dict(family="Inter", size=12, color=C_TEXT),
         ),
     )
-    if has_prices and has_sentiment:
-        fig.update_layout(
-            yaxis2=dict(title="Sentiment", gridcolor="rgba(30,42,58,0.4)", zeroline=False,
-                        title_font=dict(size=11, color=C_MUTED)),
-            xaxis2=dict(gridcolor="rgba(30,42,58,0.4)"),
-        )
 
     chart_card = dbc.Card([
         dbc.CardHeader(
