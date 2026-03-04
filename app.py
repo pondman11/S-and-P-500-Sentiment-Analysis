@@ -238,6 +238,61 @@ app.index_string = '''
                 border-color: ''' + C_BORDER + ''' !important;
                 border-radius: 10px !important;
             }
+            .Select-menu-outer, .VirtualizedSelectOption {
+                background: #0d1117 !important;
+                color: ''' + C_TEXT + ''' !important;
+            }
+            .VirtualizedSelectOption:hover,
+            .VirtualizedSelectFocusedOption {
+                background: ''' + C_BORDER + ''' !important;
+                color: #fff !important;
+            }
+            .Select-option {
+                background: #0d1117 !important;
+                color: ''' + C_TEXT + ''' !important;
+            }
+            .Select-option:hover, .Select-option.is-focused {
+                background: ''' + C_BORDER + ''' !important;
+            }
+            .Select-value-label {
+                color: ''' + C_TEXT + ''' !important;
+            }
+            .Select-input input {
+                color: ''' + C_TEXT + ''' !important;
+            }
+            .Select-placeholder {
+                color: ''' + C_MUTED + ''' !important;
+            }
+            /* Dash dropdown overrides */
+            .dash-dropdown .Select-menu-outer {
+                background: #0d1117 !important;
+                border-color: ''' + C_BORDER + ''' !important;
+            }
+            .dash-dropdown .VirtualizedSelectOption {
+                background: #0d1117 !important;
+                color: ''' + C_TEXT + ''' !important;
+            }
+            .dash-dropdown .VirtualizedSelectFocusedOption {
+                background: ''' + C_BORDER + ''' !important;
+                color: #fff !important;
+            }
+            .date-filter-indicator {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.3rem 0.75rem;
+                border-radius: 8px;
+                font-size: 0.75rem;
+                font-weight: 600;
+                background: rgba(88,166,255,0.1);
+                color: ''' + C_ACCENT + ''';
+                border: 1px solid rgba(88,166,255,0.2);
+                cursor: pointer;
+                transition: all 0.15s ease;
+            }
+            .date-filter-indicator:hover {
+                background: rgba(88,166,255,0.2);
+            }
             .DateInput_input {
                 background: #0d1117 !important;
                 border-color: ''' + C_BORDER + ''' !important;
@@ -397,6 +452,8 @@ app.layout = dbc.Container([
     ),
 
     dcc.Store(id="sentiment-data"),
+    dcc.Store(id="headline-data"),
+    dcc.Store(id="selected-date"),
 ], fluid=True, style={"maxWidth": "1440px"})
 
 
@@ -453,15 +510,15 @@ for btn_id, days in [("btn-7d", 7), ("btn-14d", 14), ("btn-30d", 30)]:
 # ---------------------------------------------------------------------------
 @callback(
     Output("sentiment-data", "data"),
+    Output("headline-data", "data"),
     Output("metrics-container", "children"),
     Output("main-chart-container", "children"),
     Output("donut-container", "children"),
-    Output("headline-container", "children"),
+    Output("selected-date", "data"),
     Input("btn-analyze", "n_clicks"),
     State("ticker-dropdown", "value"),
     State("date-range", "start_date"),
     State("date-range", "end_date"),
-    prevent_initial_call=True,
 )
 def run_analysis(n_clicks, ticker, start_str, end_str):
     start = dt.date.fromisoformat(start_str)
@@ -478,7 +535,7 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
                        style={"color": C_MUTED, "maxWidth": "400px", "textAlign": "center", "lineHeight": "1.6"}),
             ], className="empty-state", style={"minHeight": "300px"})),
         )
-        return None, "", msg, "", ""
+        return None, None, "", msg, "", None
 
     daily_df = pd.DataFrame(sent["daily"])
     s = sent["summary"]
@@ -536,7 +593,8 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
                                  "letterSpacing": "0.5px", "marginTop": "2px"}),
             ])
         ),
-        dbc.CardBody(dcc.Graph(figure=fig, config={"displayModeBar": False}),
+        dbc.CardBody(dcc.Graph(id="sentiment-chart", figure=fig,
+                              config={"displayModeBar": False}),
                      style={"padding": "0.5rem 0.75rem"}),
     ])
 
@@ -579,21 +637,79 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
                      style={"padding": "0.5rem"}),
     ])
 
-    # --- Headlines ---
-    sorted_hl = sorted(
-        sent["headlines"],
-        key=lambda h: abs(h["sentiment"]["compound"]),
-        reverse=True,
-    )[:25]
+    # --- Serialize headlines for store ---
+    hl_serialized = []
+    for h in sent["headlines"]:
+        hl_serialized.append({
+            "title": h["title"],
+            "link": h["link"],
+            "source": h["source"],
+            "date": h["date"].isoformat() if h.get("date") else None,
+            "compound": h["sentiment"]["compound"],
+        })
+
+    store = {"ticker": ticker, "name": name, "summary": s, "daily": sent["daily"]}
+    return store, hl_serialized, metrics, chart_card, donut_card, None
+
+
+# ---------------------------------------------------------------------------
+# Click on bar → toggle date filter
+# ---------------------------------------------------------------------------
+@callback(
+    Output("selected-date", "data", allow_duplicate=True),
+    Input("sentiment-chart", "clickData"),
+    State("selected-date", "data"),
+    prevent_initial_call=True,
+)
+def toggle_date_filter(click_data, current_date):
+    if not click_data or not click_data.get("points"):
+        return no_update
+    clicked_date = click_data["points"][0]["x"]
+    # Toggle: if same date clicked again, reset
+    if current_date == clicked_date:
+        return None
+    return clicked_date
+
+
+# ---------------------------------------------------------------------------
+# Render headlines based on stored data + selected date filter
+# ---------------------------------------------------------------------------
+@callback(
+    Output("headline-container", "children"),
+    Input("headline-data", "data"),
+    Input("selected-date", "data"),
+)
+def render_headlines(hl_data, selected_date):
+    if not hl_data:
+        return ""
+
+    # Filter by date if selected
+    if selected_date:
+        filtered = [h for h in hl_data if h.get("date") and h["date"] == selected_date]
+    else:
+        filtered = hl_data
+
+    sorted_hl = sorted(filtered, key=lambda h: abs(h["compound"]), reverse=True)[:25]
 
     hl_items = []
     for h in sorted_hl:
-        sc = h["sentiment"]["compound"]
-        date_str = h["date"].strftime("%b %d") if h.get("date") else ""
+        sc = h["compound"]
+        date_str = ""
+        if h.get("date"):
+            d = dt.date.fromisoformat(h["date"])
+            date_str = d.strftime("%b %d")
+
+        if sc >= 0.05:
+            cls = "score-pos"
+        elif sc <= -0.05:
+            cls = "score-neg"
+        else:
+            cls = "score-neu"
+
         hl_items.append(html.Div([
             html.Div([
                 html.Div([
-                    _score_badge(sc),
+                    html.Span(f"{sc:+.3f}", className=f"score-badge {cls}"),
                     html.Span(f"  {date_str}",
                               style={"color": C_MUTED, "fontSize": "0.7rem",
                                      "marginLeft": "0.5rem", "fontFamily": "JetBrains Mono"}),
@@ -605,18 +721,44 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
             ]),
         ], className="headline-row"))
 
-    headline_card = dbc.Card([
-        dbc.CardHeader("Top Headlines by Impact"),
+    # Header with filter indicator
+    header_children = [html.Span("Top Headlines by Impact")]
+    if selected_date:
+        d = dt.date.fromisoformat(selected_date)
+        header_children.append(
+            html.Span([
+                html.Span(f"Filtered: {d.strftime('%b %d, %Y')}"),
+                html.Span(" ✕", style={"marginLeft": "0.25rem"}),
+            ], className="date-filter-indicator", style={"float": "right"},
+               id="reset-date-filter")
+        )
+    else:
+        header_children.append(
+            html.Span("All dates", style={"float": "right", "fontSize": "0.7rem",
+                                           "color": C_MUTED, "letterSpacing": "0.5px"})
+        )
+
+    return dbc.Card([
+        dbc.CardHeader(html.Div(header_children)),
         dbc.CardBody(
             hl_items if hl_items else [
-                html.P("No headlines found.", style={"color": C_MUTED})
+                html.P("No headlines for this date.", style={"color": C_MUTED})
             ],
             style={"padding": "0.75rem 1.5rem", "maxHeight": "500px", "overflowY": "auto"},
         ),
     ])
 
-    store = {"ticker": ticker, "name": name, "summary": s, "daily": sent["daily"]}
-    return store, metrics, chart_card, donut_card, headline_card
+
+# ---------------------------------------------------------------------------
+# Reset date filter via the indicator button
+# ---------------------------------------------------------------------------
+@callback(
+    Output("selected-date", "data", allow_duplicate=True),
+    Input("reset-date-filter", "n_clicks"),
+    prevent_initial_call=True,
+)
+def reset_date_filter(n):
+    return None
 
 
 # ---------------------------------------------------------------------------
