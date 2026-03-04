@@ -1,6 +1,7 @@
 """S&P 500 universe helpers - fetch constituents and top earners."""
 import datetime as dt
 import io
+import os
 import time
 import requests
 import pandas as pd
@@ -8,6 +9,11 @@ import yfinance as yf
 from cachetools import TTLCache
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+# Workaround for Yahoo Finance cookie/crumb auth issues.
+# Setting this env var before any yfinance calls forces it to use
+# the noCrumb fallback on older versions that support it.
+os.environ["YF_NO_CRUMB"] = "1"
 
 _constituents_cache = TTLCache(maxsize=1, ttl=86400)
 _earners_cache = TTLCache(maxsize=64, ttl=3600)
@@ -46,26 +52,77 @@ def get_default_date() -> dt.date:
     return _previous_business_day(dt.date.today())
 
 
-def _download_individually(tickers: list[str], start, end,
-                           max_retries: int = 3, delay: float = 0.4) -> dict:
-    """Download price data one ticker at a time to avoid rate limiting."""
+def _make_yf_session() -> requests.Session:
+    """Create a requests session pre-loaded with Yahoo Finance cookies."""
+    session = requests.Session()
+    session.headers["User-Agent"] = USER_AGENT
+    # Hit Yahoo Finance once to pick up cookies (consent, crumb, etc.)
+    try:
+        session.get("https://finance.yahoo.com/", timeout=10)
+    except Exception:
+        pass
+    return session
+
+
+def _download_chunked(tickers: list[str], start, end,
+                      chunk_size: int = 10, max_retries: int = 3,
+                      delay: float = 1.0) -> dict:
+    """Download price data in sequential chunks with a cookie-auth session."""
+    session = _make_yf_session()
     all_data = {}
-    for idx, tk in enumerate(tickers):
+    failed = []
+
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
+
         for attempt in range(max_retries):
             try:
-                ticker_obj = yf.Ticker(tk)
+                raw = yf.download(
+                    chunk,
+                    start=start,
+                    end=end,
+                    group_by="ticker",
+                    threads=False,
+                    progress=False,
+                    session=session,
+                )
+                if raw is not None and not raw.empty:
+                    if len(chunk) == 1:
+                        all_data[chunk[0]] = raw
+                    else:
+                        for tk in chunk:
+                            try:
+                                if tk in raw.columns.get_level_values(0):
+                                    tk_data = raw[tk].dropna(how="all")
+                                    if not tk_data.empty:
+                                        all_data[tk] = tk_data
+                            except (KeyError, TypeError):
+                                pass
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(3 * (attempt + 1))
+                else:
+                    failed.extend(chunk)
+                    print(f"Chunk failed after {max_retries} attempts: {chunk[:3]}... ({e})")
+
+        if i + chunk_size < len(tickers):
+            time.sleep(delay)
+
+    # Retry failed tickers individually as last resort
+    for tk in failed:
+        for attempt in range(max_retries):
+            try:
+                ticker_obj = yf.Ticker(tk, session=session)
                 hist = ticker_obj.history(start=start, end=end, auto_adjust=True)
                 if hist is not None and not hist.empty:
                     all_data[tk] = hist
-                break  # success (even if empty)
-            except Exception as e:
+                break
+            except Exception:
                 if attempt < max_retries - 1:
                     time.sleep(2 * (attempt + 1))
-                else:
-                    print(f"Failed to download {tk} after {max_retries} attempts: {e}")
-        # Rate-limit: small delay between requests
-        if idx < len(tickers) - 1:
-            time.sleep(delay)
+        time.sleep(delay)
+
     return all_data
 
 
@@ -78,7 +135,7 @@ def _get_price_data(tickers: list[str], trade_day: dt.date) -> dict:
     start = trade_day - dt.timedelta(days=7)
     end = trade_day + dt.timedelta(days=1)
 
-    data = _download_individually(tickers, start=start, end=end)
+    data = _download_chunked(tickers, start=start, end=end)
     _price_cache[cache_key] = data
     return data
 
