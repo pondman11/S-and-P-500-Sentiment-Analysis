@@ -454,6 +454,7 @@ app.layout = dbc.Container([
     dcc.Store(id="sentiment-data"),
     dcc.Store(id="headline-data"),
     dcc.Store(id="selected-date"),
+    dcc.Store(id="selected-sentiment"),
 ], fluid=True, style={"maxWidth": "1440px"})
 
 
@@ -515,6 +516,7 @@ for btn_id, days in [("btn-7d", 7), ("btn-14d", 14), ("btn-30d", 30)]:
     Output("main-chart-container", "children"),
     Output("donut-container", "children"),
     Output("selected-date", "data"),
+    Output("selected-sentiment", "data"),
     Input("btn-analyze", "n_clicks"),
     State("ticker-dropdown", "value"),
     State("date-range", "start_date"),
@@ -535,7 +537,7 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
                        style={"color": C_MUTED, "maxWidth": "400px", "textAlign": "center", "lineHeight": "1.6"}),
             ], className="empty-state", style={"minHeight": "300px"})),
         )
-        return None, None, "", msg, "", None
+        return None, None, "", msg, "", None, None
 
     daily_df = pd.DataFrame(sent["daily"])
     s = sent["summary"]
@@ -633,7 +635,8 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
 
     donut_card = dbc.Card([
         dbc.CardHeader("Sentiment Split"),
-        dbc.CardBody(dcc.Graph(figure=fig_donut, config={"displayModeBar": False}),
+        dbc.CardBody(dcc.Graph(id="donut-chart", figure=fig_donut,
+                              config={"displayModeBar": False}),
                      style={"padding": "0.5rem"}),
     ])
 
@@ -649,7 +652,31 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
         })
 
     store = {"ticker": ticker, "name": name, "summary": s, "daily": sent["daily"]}
-    return store, hl_serialized, metrics, chart_card, donut_card, None
+    return store, hl_serialized, metrics, chart_card, donut_card, None, None
+
+
+# ---------------------------------------------------------------------------
+# Helpers for sentiment classification
+# ---------------------------------------------------------------------------
+def _classify(compound):
+    if compound >= 0.05:
+        return "Bullish"
+    elif compound <= -0.05:
+        return "Bearish"
+    return "Neutral"
+
+
+SENTIMENT_COLORS = {"Bullish": C_GREEN, "Neutral": "#1e2a3a", "Bearish": C_RED}
+SENTIMENT_COLORS_ALPHA = {
+    "Bullish": "rgba(63,185,80,0.85)",
+    "Bearish": "rgba(248,81,73,0.85)",
+    "Neutral": "rgba(110,118,129,0.5)",
+}
+SENTIMENT_COLORS_DIM = {
+    "Bullish": "rgba(63,185,80,0.15)",
+    "Bearish": "rgba(248,81,73,0.15)",
+    "Neutral": "rgba(110,118,129,0.1)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -665,29 +692,184 @@ def toggle_date_filter(click_data, current_date):
     if not click_data or not click_data.get("points"):
         return no_update
     clicked_date = click_data["points"][0]["x"]
-    # Toggle: if same date clicked again, reset
     if current_date == clicked_date:
         return None
     return clicked_date
 
 
 # ---------------------------------------------------------------------------
-# Render headlines based on stored data + selected date filter
+# Click on donut slice → toggle sentiment filter
+# ---------------------------------------------------------------------------
+@callback(
+    Output("selected-sentiment", "data", allow_duplicate=True),
+    Input("donut-chart", "clickData"),
+    State("selected-sentiment", "data"),
+    prevent_initial_call=True,
+)
+def toggle_sentiment_filter(click_data, current_sentiment):
+    if not click_data or not click_data.get("points"):
+        return no_update
+    label = click_data["points"][0]["label"]
+    if current_sentiment == label:
+        return None
+    return label
+
+
+# ---------------------------------------------------------------------------
+# Update bar chart when sentiment filter changes (highlight matching days)
+# ---------------------------------------------------------------------------
+@callback(
+    Output("sentiment-chart", "figure"),
+    Input("selected-sentiment", "data"),
+    State("sentiment-data", "data"),
+    prevent_initial_call=True,
+)
+def update_chart_highlight(selected_sentiment, store):
+    if not store or not store.get("daily"):
+        return no_update
+
+    daily_df = pd.DataFrame(store["daily"])
+    daily_with_data = daily_df[daily_df["avg_compound"].notna()]
+
+    fig = go.Figure()
+    if not daily_with_data.empty:
+        if selected_sentiment:
+            colors = []
+            for v in daily_with_data["avg_compound"]:
+                cat = _classify(v)
+                if cat == selected_sentiment:
+                    colors.append(SENTIMENT_COLORS_ALPHA[cat])
+                else:
+                    colors.append(SENTIMENT_COLORS_DIM[cat])
+        else:
+            colors = [
+                "rgba(63,185,80,0.85)" if v >= 0 else "rgba(248,81,73,0.85)"
+                for v in daily_with_data["avg_compound"]
+            ]
+
+        fig.add_trace(go.Bar(
+            x=daily_with_data["date"], y=daily_with_data["avg_compound"],
+            name="Sentiment", marker_color=colors,
+            marker_line_width=0,
+            hovertemplate="<b>%{x}</b><br>Sentiment: %{y:+.3f}<extra></extra>",
+        ))
+        fig.add_hline(y=0, line_color=C_BORDER, line_width=1)
+
+    fig.update_layout(
+        **CHART_LAYOUT,
+        height=420,
+        showlegend=False,
+        yaxis=dict(title="Sentiment Score", gridcolor="rgba(30,42,58,0.4)", zeroline=False,
+                   title_font=dict(size=11, color=C_MUTED)),
+        hoverlabel=dict(
+            bgcolor=C_CARD, bordercolor=C_BORDER,
+            font=dict(family="Inter", size=12, color=C_TEXT),
+        ),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Update donut to show selection state
+# ---------------------------------------------------------------------------
+@callback(
+    Output("donut-chart", "figure"),
+    Input("selected-sentiment", "data"),
+    State("sentiment-data", "data"),
+    prevent_initial_call=True,
+)
+def update_donut_highlight(selected_sentiment, store):
+    if not store or not store.get("summary"):
+        return no_update
+
+    s = store["summary"]
+    labels = ["Bullish", "Neutral", "Bearish"]
+    values = [s["positive"], s["neutral"], s["negative"]]
+    base_colors = [C_GREEN, "#1e2a3a", C_RED]
+
+    if selected_sentiment:
+        # Dim unselected slices
+        colors = []
+        pull = []
+        for i, lbl in enumerate(labels):
+            if lbl == selected_sentiment:
+                colors.append(base_colors[i])
+                pull.append(0.08)
+            else:
+                colors.append("rgba(30,42,58,0.3)")
+                pull.append(0)
+    else:
+        colors = base_colors
+        pull = [0, 0, 0]
+
+    avg = s["avg_compound"]
+    avg_color = C_GREEN if avg >= 0.05 else C_RED if avg <= -0.05 else C_MUTED
+
+    fig_donut = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        marker=dict(
+            colors=colors,
+            line=dict(color=C_CARD, width=4),
+        ),
+        hole=0.7,
+        pull=pull,
+        textinfo="percent",
+        textfont=dict(size=12, family="JetBrains Mono"),
+        hovertemplate="<b>%{label}</b><br>%{value} headlines<br>%{percent}<extra></extra>",
+    ))
+
+    center_text = f"<b>{avg:+.2f}</b>"
+    if selected_sentiment:
+        center_text = f"<b>{selected_sentiment}</b>"
+        avg_color = SENTIMENT_COLORS.get(selected_sentiment, C_ACCENT)
+        if selected_sentiment == "Neutral":
+            avg_color = "#8b949e"
+
+    fig_donut.update_layout(
+        **CHART_LAYOUT,
+        height=340,
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="top", y=-0.02,
+            xanchor="center", x=0.5,
+            font=dict(size=11, color=C_MUTED),
+        ),
+        hoverlabel=dict(bgcolor=C_CARD, bordercolor=C_BORDER,
+                        font=dict(family="Inter", size=12, color=C_TEXT)),
+        annotations=[dict(
+            text=center_text,
+            x=0.5, y=0.5, font_size=18 if selected_sentiment else 22,
+            font_color=avg_color,
+            font_family="JetBrains Mono",
+            showarrow=False,
+        )],
+    )
+    return fig_donut
+
+
+# ---------------------------------------------------------------------------
+# Render headlines based on stored data + date filter + sentiment filter
 # ---------------------------------------------------------------------------
 @callback(
     Output("headline-container", "children"),
     Input("headline-data", "data"),
     Input("selected-date", "data"),
+    Input("selected-sentiment", "data"),
 )
-def render_headlines(hl_data, selected_date):
+def render_headlines(hl_data, selected_date, selected_sentiment):
     if not hl_data:
         return ""
 
-    # Filter by date if selected
+    filtered = hl_data
+
+    # Filter by date
     if selected_date:
-        filtered = [h for h in hl_data if h.get("date") and h["date"] == selected_date]
-    else:
-        filtered = hl_data
+        filtered = [h for h in filtered if h.get("date") and h["date"] == selected_date]
+
+    # Filter by sentiment category
+    if selected_sentiment:
+        filtered = [h for h in filtered if _classify(h["compound"]) == selected_sentiment]
 
     sorted_hl = sorted(filtered, key=lambda h: abs(h["compound"]), reverse=True)[:25]
 
@@ -721,28 +903,49 @@ def render_headlines(hl_data, selected_date):
             ]),
         ], className="headline-row"))
 
-    # Header with filter indicator
+    # Header with active filter indicators
     header_children = [html.Span("Top Headlines by Impact")]
+    filter_pills = []
+
+    if selected_sentiment:
+        sent_color = SENTIMENT_COLORS.get(selected_sentiment, C_ACCENT)
+        if selected_sentiment == "Neutral":
+            sent_color = "#8b949e"
+        filter_pills.append(
+            html.Span([
+                html.Span(f"{selected_sentiment}"),
+                html.Span(" ✕", style={"marginLeft": "0.25rem"}),
+            ], className="date-filter-indicator",
+               style={"borderColor": sent_color, "color": sent_color,
+                       "background": f"rgba({','.join(str(int(sent_color.lstrip('#')[i:i+2], 16)) for i in (0,2,4))},0.1)" if sent_color.startswith('#') else "rgba(88,166,255,0.1)"},
+               id="reset-sentiment-filter")
+        )
+
     if selected_date:
         d = dt.date.fromisoformat(selected_date)
-        header_children.append(
+        filter_pills.append(
             html.Span([
-                html.Span(f"Filtered: {d.strftime('%b %d, %Y')}"),
+                html.Span(f"{d.strftime('%b %d, %Y')}"),
                 html.Span(" ✕", style={"marginLeft": "0.25rem"}),
-            ], className="date-filter-indicator", style={"float": "right"},
+            ], className="date-filter-indicator",
                id="reset-date-filter")
         )
-    else:
-        header_children.append(
-            html.Span("All dates", style={"float": "right", "fontSize": "0.7rem",
-                                           "color": C_MUTED, "letterSpacing": "0.5px"})
+
+    if not filter_pills:
+        filter_pills.append(
+            html.Span("All dates", style={"fontSize": "0.7rem", "color": C_MUTED,
+                                           "letterSpacing": "0.5px"})
         )
+
+    header_children.append(
+        html.Div(filter_pills, style={"float": "right", "display": "flex", "gap": "0.5rem"})
+    )
 
     return dbc.Card([
         dbc.CardHeader(html.Div(header_children)),
         dbc.CardBody(
             hl_items if hl_items else [
-                html.P("No headlines for this date.", style={"color": C_MUTED})
+                html.P("No headlines match these filters.", style={"color": C_MUTED})
             ],
             style={"padding": "0.75rem 1.5rem", "maxHeight": "500px", "overflowY": "auto"},
         ),
@@ -750,7 +953,7 @@ def render_headlines(hl_data, selected_date):
 
 
 # ---------------------------------------------------------------------------
-# Reset date filter via the indicator button
+# Reset filters via indicator buttons
 # ---------------------------------------------------------------------------
 @callback(
     Output("selected-date", "data", allow_duplicate=True),
@@ -758,6 +961,15 @@ def render_headlines(hl_data, selected_date):
     prevent_initial_call=True,
 )
 def reset_date_filter(n):
+    return None
+
+
+@callback(
+    Output("selected-sentiment", "data", allow_duplicate=True),
+    Input("reset-sentiment-filter", "n_clicks"),
+    prevent_initial_call=True,
+)
+def reset_sentiment_filter(n):
     return None
 
 
