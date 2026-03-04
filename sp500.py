@@ -46,52 +46,26 @@ def get_default_date() -> dt.date:
     return _previous_business_day(dt.date.today())
 
 
-def _download_in_batches(tickers: list[str], start, end,
-                         batch_size: int = 20, max_retries: int = 3) -> dict:
-    """Download price data in small batches to avoid rate limiting."""
-    # Set a custom user-agent for yfinance requests
-    yf_session = requests.Session()
-    yf_session.headers["User-Agent"] = USER_AGENT
-
+def _download_individually(tickers: list[str], start, end,
+                           max_retries: int = 3, delay: float = 0.4) -> dict:
+    """Download price data one ticker at a time to avoid rate limiting."""
     all_data = {}
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i:i + batch_size]
-
+    for idx, tk in enumerate(tickers):
         for attempt in range(max_retries):
             try:
-                raw = yf.download(
-                    batch,          # pass list directly
-                    start=start,
-                    end=end,
-                    group_by="ticker",
-                    threads=False,
-                    progress=False,
-                    session=yf_session,
-                )
-                if raw is not None and not raw.empty:
-                    if len(batch) == 1:
-                        all_data[batch[0]] = raw
-                    else:
-                        # yfinance returns MultiIndex columns (ticker, field)
-                        for tk in batch:
-                            try:
-                                if tk in raw.columns.get_level_values(0):
-                                    tk_data = raw[tk]
-                                    if tk_data is not None and not tk_data.empty:
-                                        all_data[tk] = tk_data
-                            except (KeyError, TypeError):
-                                pass
-                break  # success
+                ticker_obj = yf.Ticker(tk)
+                hist = ticker_obj.history(start=start, end=end, auto_adjust=True)
+                if hist is not None and not hist.empty:
+                    all_data[tk] = hist
+                break  # success (even if empty)
             except Exception as e:
                 if attempt < max_retries - 1:
                     time.sleep(2 * (attempt + 1))
                 else:
-                    print(f"Batch download failed after {max_retries} attempts: {e}")
-
-        # Small delay between batches to avoid rate limits
-        if i + batch_size < len(tickers):
-            time.sleep(2)
-
+                    print(f"Failed to download {tk} after {max_retries} attempts: {e}")
+        # Rate-limit: small delay between requests
+        if idx < len(tickers) - 1:
+            time.sleep(delay)
     return all_data
 
 
@@ -104,7 +78,7 @@ def _get_price_data(tickers: list[str], trade_day: dt.date) -> dict:
     start = trade_day - dt.timedelta(days=7)
     end = trade_day + dt.timedelta(days=1)
 
-    data = _download_in_batches(tickers, start=start, end=end)
+    data = _download_individually(tickers, start=start, end=end)
     _price_cache[cache_key] = data
     return data
 
