@@ -37,8 +37,10 @@ def get_prices(ticker: str, start_date: dt.date, end_date: dt.date) -> list[dict
             progress=False,
             threads=False,
             session=session,
+            timeout=15,
         )
-    except Exception:
+    except Exception as e:
+        print(f"[prices] Failed to fetch {ticker}: {e}")
         return []
 
     if hist is None or hist.empty:
