@@ -577,8 +577,10 @@ def run_analysis(n_clicks, ticker, start_str, end_str):
         **CHART_LAYOUT,
         height=420,
         showlegend=False,
-        yaxis=dict(title="Sentiment Score", gridcolor="rgba(30,42,58,0.4)", zeroline=False,
-                   title_font=dict(size=11, color=C_MUTED)),
+        yaxis_title="Sentiment Score",
+        yaxis_gridcolor="rgba(30,42,58,0.4)",
+        yaxis_zeroline=False,
+        yaxis_title_font=dict(size=11, color=C_MUTED),
         hoverlabel=dict(
             bgcolor=C_CARD, bordercolor=C_BORDER,
             font=dict(family="Inter", size=12, color=C_TEXT),
