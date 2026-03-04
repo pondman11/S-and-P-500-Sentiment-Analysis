@@ -47,7 +47,7 @@ def get_default_date() -> dt.date:
 
 
 def _download_in_batches(tickers: list[str], start, end,
-                         batch_size: int = 50, max_retries: int = 3) -> dict:
+                         batch_size: int = 20, max_retries: int = 3) -> dict:
     """Download price data in small batches to avoid rate limiting."""
     # Set a custom user-agent for yfinance requests
     yf_session = requests.Session()
@@ -64,7 +64,7 @@ def _download_in_batches(tickers: list[str], start, end,
                     start=start,
                     end=end,
                     group_by="ticker",
-                    threads=True,
+                    threads=False,
                     progress=False,
                     session=yf_session,
                 )
@@ -90,7 +90,7 @@ def _download_in_batches(tickers: list[str], start, end,
 
         # Small delay between batches to avoid rate limits
         if i + batch_size < len(tickers):
-            time.sleep(1)
+            time.sleep(2)
 
     return all_data
 
